@@ -1,26 +1,29 @@
 import { Adapter, AddonManagerProxy } from "gateway-addon";
+import { Url } from "url";
+const manifest = require('./manifest.json');
 
-class ThingURLAdapter extends Adapter {
+type TDeviceId = string;
+
+const POLL_INTERVAL = 5 * 1000;
+
+export class ThingURLAdapter extends Adapter {
+  private readonly knownUrls: {[key: string]: any} = {};
+  private readonly savedDevices: Set<TDeviceId> = new Set();
+  private readonly pollInterval: number = POLL_INTERVAL;
+
   constructor(addonManager: AddonManagerProxy) {
-    const manifest = require('./manifest.json');
     super(addonManager, manifest.id, manifest.id);
     addonManager.addAdapter(this);
-    this.knownUrls = {};
-    this.savedDevices = new Set();
     this.pollInterval = POLL_INTERVAL;
   }
 
-  async loadThing(url, retryCounter) {
-    if (typeof retryCounter === 'undefined') {
-      retryCounter = 0;
-    }
-
+  private async loadThing(url: Url, retryCounter:number = 0) {
     const href = url.href.replace(/\/$/, '');
 
     if (!this.knownUrls[href]) {
       this.knownUrls[href] = {
         href,
-        authentication: url.authentication,
+        authentication: url.auth, // authentication does not exits on url - is this the right url type?
         digest: '',
         timestamp: 0,
       };
@@ -32,7 +35,7 @@ class ThingURLAdapter extends Adapter {
 
     let res;
     try {
-      res = await fetch(href, {headers: getHeaders(url.authentication)});
+      res = await fetch(href, {headers: getHeaders(url.auth)});
     } catch (e) {
       // Retry the connection at a 2 second interval up to 5 times.
       if (retryCounter >= 5) {
@@ -101,7 +104,7 @@ class ThingURLAdapter extends Adapter {
     }
   }
 
-  unloadThing(url) {
+  private unloadThing(url) {
     url = url.replace(/\/$/, '');
 
     for (const id in this.devices) {
@@ -123,7 +126,7 @@ class ThingURLAdapter extends Adapter {
    * @param {String} deviceId ID of the device to add.
    * @return {Promise} which resolves to the device added.
    */
-  addDevice(deviceId, deviceURL, authentication, description, mdnsUrl) {
+  private addDevice(deviceId, deviceURL, authentication, description, mdnsUrl) {
     return new Promise((resolve, reject) => {
       if (deviceId in this.devices) {
         reject(`Device: ${deviceId} already exists.`);
@@ -155,9 +158,10 @@ class ThingURLAdapter extends Adapter {
    *
    * @param {string} deviceId - ID of the device
    */
-  handleDeviceSaved(deviceId) {
+  handleDeviceSaved(deviceId: string, device: DeviceWithoutIdSchema) {
     this.savedDevices.add(deviceId);
 
+    this.getDevice(deviceId)?.startReading(true);
     if (this.devices.hasOwnProperty(deviceId)) {
       this.devices[deviceId].startReading(true);
     }
@@ -241,71 +245,4 @@ class ThingURLAdapter extends Adapter {
 
     return super.unload();
   }
-}
-
-function startDNSDiscovery(adapter) {
-  console.log('Starting mDNS discovery');
-
-  webthingBrowser =
-    new dnssd.Browser(new dnssd.ServiceType('_webthing._tcp'));
-  webthingBrowser.on('serviceUp', (service) => {
-    const host = service.host.replace(/\.$/, '');
-    let protocol = 'http';
-    if (service.txt.hasOwnProperty('tls') && service.txt.tls === '1') {
-      protocol = 'https';
-    }
-    adapter.loadThing({
-      href: `${protocol}://${host}:${service.port}${service.txt.path}`,
-      authentication: {
-        method: 'none',
-      },
-    });
-  });
-  webthingBrowser.on('serviceDown', (service) => {
-    const host = service.host.replace(/\.$/, '');
-    let protocol = 'http';
-    if (service.txt.hasOwnProperty('tls') && service.txt.tls === '1') {
-      protocol = 'https';
-    }
-    adapter.unloadThing(
-      `${protocol}://${host}:${service.port}${service.txt.path}`
-    );
-  });
-  webthingBrowser.start();
-
-  // Support legacy devices
-  subtypeBrowser =
-    new dnssd.Browser(new dnssd.ServiceType('_http._tcp,_webthing'));
-  subtypeBrowser.on('serviceUp', (service) => {
-    adapter.loadThing({
-      href: service.txt.url,
-      authentication: {
-        method: 'none',
-      },
-    });
-  });
-  subtypeBrowser.on('serviceDown', (service) => {
-    adapter.unloadThing(service.txt.url);
-  });
-  subtypeBrowser.start();
-
-  httpBrowser = new dnssd.Browser(new dnssd.ServiceType('_http._tcp'));
-  httpBrowser.on('serviceUp', (service) => {
-    if (typeof service.txt === 'object' &&
-        service.txt.hasOwnProperty('webthing')) {
-      adapter.loadThing({
-        href: service.txt.url,
-        authentication: {
-          method: 'none',
-        },
-      });
-    }
-  });
-  httpBrowser.on('serviceDown', (service) => {
-    if (typeof service.txt === 'object' &&
-        service.txt.hasOwnProperty('webthing')) {
-      adapter.unloadThing(service.txt.url);
-    }
-  });
-  httpBrowser.start();
 }
